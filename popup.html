@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Geo Proxy Rotator</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Geo Proxy Rotator</h1>
+      <p>Test bài viết theo IP và vị trí USA</p>
+    </div>
+    <button id="openOptions" type="button" class="ghost">Cài đặt</button>
+  </header>
+
+  <p id="phase" class="phase idle">Sẵn sàng</p>
+
+  <div class="actions">
+    <button id="start" type="button">Bắt đầu</button>
+    <button id="nextAuto" type="button" class="ghost" disabled title="Bỏ qua bài hiện tại và chuyển bài tiếp ngay">Next tự động</button>
+    <button id="stop" type="button" class="danger" disabled>Dừng</button>
+  </div>
+
+  <dl class="stats">
+    <div>
+      <dt>Proxy hiện tại</dt>
+      <dd id="proxy">—</dd>
+    </div>
+    <div>
+      <dt>Vị trí giả lập</dt>
+      <dd id="location">—</dd>
+    </div>
+    <div>
+      <dt>Bài viết</dt>
+      <dd id="article" title="">—</dd>
+    </div>
+    <div>
+      <dt id="countdownLabel">Còn lại tới bài tiếp</dt>
+      <dd id="countdown">—</dd>
+    </div>
+    <div>
+      <dt>Proxy lỗi</dt>
+      <dd id="failed">0</dd>
+    </div>
+  </dl>
+
+  <section>
+    <h2>Nhật ký gần nhất</h2>
+    <ol id="logs"></ol>
+  </section>
+
+  <p id="message" class="message" role="status"></p>
+  <footer>Khi giả lập vị trí, Chrome hiện thanh “đang gỡ lỗi tab”. Proxy miễn phí có thể chết giữa chừng.</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

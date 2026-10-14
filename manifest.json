@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Geo Proxy Rotator",
+  "version": "1.0.0",
+  "description": "Xoay proxy HTTP và giả lập vị trí USA để test hiển thị bài viết theo IP.",
+  "minimum_chrome_version": "109",
+  "permissions": [
+    "proxy",
+    "storage",
+    "tabs",
+    "debugger",
+    "alarms",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Geo Proxy Rotator",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

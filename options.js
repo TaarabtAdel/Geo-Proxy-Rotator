@@ -1,0 +1,463 @@
+const $ = (id) => document.getElementById(id);
+
+const API_SOURCE = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all";
+const JSDELIVR_SOURCE = "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/us/data.json";
+const DEFAULT_SOURCE = API_SOURCE + "\n" + JSDELIVR_SOURCE;
+
+function normalizeSources(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed || trimmed === API_SOURCE) return DEFAULT_SOURCE;
+  return trimmed;
+}
+
+function parseSourceLine(raw) {
+  const text = String(raw || "").trim();
+  let urlText = text;
+  let forceProtocol = "";
+  const splitAt = text.lastIndexOf("|");
+  if (splitAt > 0) {
+    const tag = text.slice(splitAt + 1).trim().toLowerCase();
+    if (tag === "socks4" || tag === "socks5") {
+      urlText = text.slice(0, splitAt).trim();
+      forceProtocol = tag;
+    }
+  }
+  let url;
+  try {
+    url = new URL(urlText);
+  } catch (err) {
+    throw new Error("URL nguồn không hợp lệ: " + text);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("URL nguồn phải là http hoặc https: " + text);
+  }
+  return { url: url.href, forceProtocol };
+}
+
+function formatSourceLine(source) {
+  return source.forceProtocol ? source.url + "|" + source.forceProtocol : source.url;
+}
+
+function sourceEntries(text) {
+  const entries = [];
+  const seen = new Set();
+  for (const line of normalizeSources(text).split(/\r?\n/)) {
+    const raw = line.trim();
+    if (!raw) continue;
+    const entry = parseSourceLine(raw);
+    const key = entry.url + "|" + entry.forceProtocol;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(entry);
+  }
+  if (!entries.length) throw new Error("Chưa có URL nguồn proxy.");
+  return entries;
+}
+
+function mergeProxyBatches(batches) {
+  const merged = [];
+  const seen = new Set();
+  for (const batch of batches) {
+    const items = batch.some((proxy) => Number.isFinite(proxy.uptime))
+      ? [...batch].sort((a, b) => (b.uptime || 0) - (a.uptime || 0))
+      : batch;
+    for (const proxy of items) {
+      const key = self.proxyKey(proxy);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(proxy);
+    }
+  }
+  return merged;
+}
+
+function sourceLabel(url) {
+  if (url.includes("cdn.jsdelivr.net")) return "jsDelivr";
+  if (url.includes("api.proxyscrape.com")) return "ProxyScrape API";
+  try {
+    return new URL(url).hostname;
+  } catch (err) {
+    return url;
+  }
+}
+
+let formDirty = false;
+
+function countDonePairs(map) {
+  let total = 0;
+  if (!map || typeof map !== "object") return 0;
+  for (const list of Object.values(map)) {
+    if (Array.isArray(list)) total += list.length;
+  }
+  return total;
+}
+
+function renderDoneCount(map) {
+  const total = countDonePairs(map);
+  $("doneHint").textContent = total
+    ? "Đã lưu " + total + " cặp proxy–bài. Lần chạy sau sẽ bỏ qua các cặp này."
+    : "Chưa có cặp proxy–bài đã chạy.";
+}
+
+function renderPlace(place) {
+  $("locationHint").textContent = place && place.label ? place.label : "Chưa chọn nơi lưu.";
+  $("grantAccess").disabled = !place || !place.kind;
+}
+
+function applyConfig(config) {
+  const data = config || {};
+  $("sourceUrl").value = normalizeSources(data.proxySourceUrl || DEFAULT_SOURCE);
+  $("proxyText").value = data.proxyText || "";
+  $("articleText").value = data.articleText || "";
+  $("waitMin").value = String(data.waitMinSec ?? 100);
+  $("waitMax").value = String(data.waitMaxSec ?? 120);
+  $("timeout").value = String(data.proxyTimeoutSec ?? 15);
+  $("articleTimeout").value = String(data.articleLoadTimeoutSec ?? 60);
+  $("scrollEnabled").checked = data.scrollEnabled !== false;
+  $("scrollSpeed").value = ["slow", "normal", "fast"].includes(data.scrollSpeed) ? data.scrollSpeed : "normal";
+  $("scrollDepth").value = String(data.scrollDepthPercent ?? 95);
+  $("loop").checked = Boolean(data.loop);
+}
+
+function formFocused() {
+  const el = document.activeElement;
+  return Boolean(el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
+}
+
+function setStatus(text, isError) {
+  const node = $("status");
+  node.textContent = text || "";
+  node.className = isError ? "error" : "";
+}
+
+let proxyHealth = {};
+
+function proxyRowKey(proxy) {
+  return self.proxyKey(proxy);
+}
+
+function healthView(proxy) {
+  const entry = proxyHealth[proxyRowKey(proxy)];
+  if (!entry || !entry.status || entry.status === "unknown") {
+    return { text: "Chưa thử", className: "status-unknown", title: "" };
+  }
+  if (entry.status === "live") {
+    const ip = entry.ip ? "IP: " + entry.ip : "Kết nối thành công";
+    return { text: "Live", className: "status-live", title: ip };
+  }
+  if (entry.status === "pending") {
+    return { text: "Đang thử", className: "status-pending", title: "Đang kiểm tra proxy" };
+  }
+  return { text: "Không", className: "status-dead", title: entry.note || "Proxy lỗi" };
+}
+
+function articleLines(text) {
+  return String(text || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function validateArticles(text) {
+  const urls = [];
+  const errors = [];
+  articleLines(text).forEach((line, index) => {
+    try {
+      const url = new URL(line);
+      if (url.protocol !== "http:" && url.protocol !== "https:") {
+        errors.push("Dòng " + (index + 1) + " phải là URL http hoặc https.");
+        return;
+      }
+      urls.push(url.href);
+    } catch (err) {
+      errors.push("Dòng " + (index + 1) + " không phải URL hợp lệ.");
+    }
+  });
+  return { urls, errors };
+}
+
+function currentProxies() {
+  return self.parseProxySource($("proxyText").value);
+}
+
+function renderProxyTable() {
+  const { proxies, skipped } = currentProxies();
+  $("proxyCount").textContent = proxies.length + " proxy hợp lệ";
+  const hints = [];
+  if (skipped) hints.push("Bỏ qua " + skipped + " dòng không đúng định dạng.");
+  $("proxyHint").textContent = hints.join(" ");
+
+  const body = $("proxyTable");
+  body.replaceChildren();
+  proxies.forEach((proxy, index) => {
+    const row = document.createElement("tr");
+    const cells = [
+      String(index + 1),
+      proxy.host,
+      String(proxy.port),
+      (proxy.protocol || "http").toUpperCase(),
+      proxy.username ? "Có" : "Không"
+    ];
+    for (const value of cells) {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      row.append(cell);
+    }
+    const healthCell = document.createElement("td");
+    const badge = document.createElement("span");
+    const health = healthView(proxy);
+    badge.className = "status-badge " + health.className;
+    badge.textContent = health.text;
+    if (health.title) badge.title = health.title;
+    healthCell.append(badge);
+    row.append(healthCell);
+    const action = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "link";
+    button.textContent = "Xoá";
+    button.dataset.index = String(index);
+    action.append(button);
+    row.append(action);
+    body.append(row);
+  });
+  if (!proxies.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 7;
+    cell.textContent = "Chưa có proxy hợp lệ.";
+    row.append(cell);
+    body.append(row);
+  }
+}
+
+function renderArticleHint() {
+  const { urls, errors } = validateArticles($("articleText").value);
+  if (errors.length) {
+    $("articleHint").textContent = errors.slice(0, 3).join(" ");
+    return;
+  }
+  $("articleHint").textContent = urls.length ? urls.length + " URL hợp lệ." : "Chưa có bài viết.";
+}
+
+function readForm() {
+  const articles = validateArticles($("articleText").value);
+  if (articles.errors.length) {
+    throw new Error(articles.errors[0]);
+  }
+  const parsed = currentProxies();
+  const rawLines = articleLines($("proxyText").value).filter((line) => !line.startsWith("#"));
+  if (rawLines.length && !parsed.proxies.length) {
+    throw new Error("Không có dòng proxy hợp lệ. Dùng ip:port, ip:port:user:pass hoặc socks5://ip:port.");
+  }
+  let waitMin = Math.round(Number($("waitMin").value));
+  let waitMax = Math.round(Number($("waitMax").value));
+  const timeout = Math.round(Number($("timeout").value));
+  const articleTimeout = Math.round(Number($("articleTimeout").value));
+  if (!Number.isInteger(waitMin) || !Number.isInteger(waitMax) || waitMin < 1 || waitMax < 1 || waitMin > 3600 || waitMax > 3600) {
+    throw new Error("Thời gian chờ phải từ 1 đến 3600 giây.");
+  }
+  if (waitMin > waitMax) {
+    const swap = waitMin;
+    waitMin = waitMax;
+    waitMax = swap;
+    $("waitMin").value = String(waitMin);
+    $("waitMax").value = String(waitMax);
+  }
+  if (!Number.isInteger(timeout) || timeout < 5 || timeout > 180) {
+    throw new Error("Timeout proxy phải từ 5 đến 180 giây.");
+  }
+  if (!Number.isInteger(articleTimeout) || articleTimeout < 15 || articleTimeout > 300) {
+    throw new Error("Timeout tải bài phải từ 15 đến 300 giây.");
+  }
+  const scrollDepth = Math.round(Number($("scrollDepth").value));
+  if (!Number.isInteger(scrollDepth) || scrollDepth < 50 || scrollDepth > 100) {
+    throw new Error("Độ sâu cuộn phải từ 50 đến 100%.");
+  }
+  const sourceUrl = sourceEntries($("sourceUrl").value).map(formatSourceLine).join("\n");
+  return {
+    proxySourceUrl: sourceUrl,
+    proxyText: parsed.proxies.map((proxy) => self.proxyToLine(proxy)).join("\n"),
+    proxies: parsed.proxies,
+    articleText: articles.urls.join("\n"),
+    articles: articles.urls,
+    waitMinSec: waitMin,
+    waitMaxSec: waitMax,
+    proxyTimeoutSec: timeout,
+    articleLoadTimeoutSec: articleTimeout,
+    scrollEnabled: $("scrollEnabled").checked,
+    scrollSpeed: $("scrollSpeed").value,
+    scrollDepthPercent: Math.round(Number($("scrollDepth").value)),
+    loop: $("loop").checked
+  };
+}
+
+async function save() {
+  const data = readForm();
+  await self.sharedStore.update(function (store) {
+    store.config = data;
+    return store;
+  });
+  $("proxyText").value = data.proxyText;
+  $("articleText").value = data.articleText;
+  $("sourceUrl").value = data.proxySourceUrl;
+  formDirty = false;
+  renderProxyTable();
+  renderArticleHint();
+  const note = data.proxies.length + " proxy, " + data.articles.length + " bài.";
+  setStatus("Đã lưu vào file chung lúc " + new Date().toLocaleTimeString("vi-VN", { hour12: false }) + " · " + note, false);
+}
+
+async function load() {
+  const place = await self.sharedStore.describe();
+  renderPlace(place);
+  if (!place.connected) {
+    setStatus(place.label, true);
+    renderProxyTable();
+    renderArticleHint();
+    renderDoneCount(null);
+    return;
+  }
+  const data = await self.sharedStore.readData();
+  applyConfig(data.config);
+  proxyHealth = data.proxyHealth && typeof data.proxyHealth === "object" ? data.proxyHealth : {};
+  formDirty = false;
+  renderProxyTable();
+  renderArticleHint();
+  renderDoneCount(data.proxyArticleDone);
+  setStatus("", false);
+}
+
+async function fetchProxies() {
+  const button = $("fetchProxies");
+  button.disabled = true;
+  setStatus("Đang tải danh sách proxy...", false);
+  try {
+    const sources = sourceEntries($("sourceUrl").value);
+    $("sourceUrl").value = sources.map(formatSourceLine).join("\n");
+    const batches = [];
+    const notes = [];
+    const errors = [];
+    for (const source of sources) {
+      const label = sourceLabel(source.url) + (source.forceProtocol ? " " + source.forceProtocol : "");
+      try {
+        const response = await fetch(source.url, { cache: "no-store", signal: AbortSignal.timeout(20000) });
+        if (!response.ok) throw new Error("HTTP " + response.status);
+        const parsed = self.parseProxySource(await response.text());
+        if (source.forceProtocol) {
+          for (const proxy of parsed.proxies) proxy.protocol = source.forceProtocol;
+        }
+        batches.push(parsed.proxies);
+        notes.push(label + " " + parsed.proxies.length);
+      } catch (err) {
+        errors.push(label + ": " + (err.message || "không tải được"));
+      }
+    }
+    const merged = mergeProxyBatches(batches);
+    if (!merged.length) throw new Error(errors.join(" · ") || "Không tìm thấy proxy trong các nguồn.");
+    $("proxyText").value = merged.map((proxy) => self.proxyToLine(proxy)).join("\n");
+    renderProxyTable();
+    await save();
+    const extra = errors.length ? " Nguồn lỗi: " + errors.join(" · ") + "." : "";
+    setStatus("Đã gộp " + merged.length + " proxy (" + notes.join(", ") + ")." + extra, false);
+  } catch (err) {
+    setStatus(err.message || "Không tải được proxy. Nếu rotator đang chạy, hãy bấm Dừng rồi thử lại.", true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("proxyText").addEventListener("input", () => {
+  formDirty = true;
+  renderProxyTable();
+});
+$("articleText").addEventListener("input", () => {
+  formDirty = true;
+  renderArticleHint();
+});
+for (const id of ["sourceUrl", "waitMin", "waitMax", "timeout", "articleTimeout", "scrollDepth"]) {
+  $(id).addEventListener("input", () => { formDirty = true; });
+}
+for (const id of ["scrollEnabled", "scrollSpeed", "loop"]) {
+  $(id).addEventListener("change", () => { formDirty = true; });
+}
+$("proxyTable").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-index]");
+  if (!button) return;
+  const index = Number(button.dataset.index);
+  const parsed = currentProxies();
+  parsed.proxies.splice(index, 1);
+  $("proxyText").value = parsed.proxies.map((proxy) => self.proxyToLine(proxy)).join("\n");
+  formDirty = true;
+  renderProxyTable();
+});
+$("clearProxies").addEventListener("click", async () => {
+  if ($("proxyText").value.trim() && !window.confirm("Xoá toàn bộ danh sách proxy trên trang này?")) return;
+  $("proxyText").value = "";
+  proxyHealth = {};
+  renderProxyTable();
+  try {
+    await self.sharedStore.update(function (store) {
+      store.config.proxyText = "";
+      store.config.proxies = [];
+      store.proxyHealth = {};
+      return store;
+    }, { replaceHealth: true });
+    formDirty = true;
+    setStatus("Đã xoá danh sách proxy trong file chung.", false);
+  } catch (err) {
+    formDirty = true;
+    setStatus(err.message || "Không xoá được proxy trong file chung.", true);
+  }
+});
+$("clearDone").addEventListener("click", async () => {
+  try {
+    const data = await self.sharedStore.readData();
+    const total = countDonePairs(data.proxyArticleDone);
+    if (!total) {
+      renderDoneCount(data.proxyArticleDone);
+      return;
+    }
+    if (!window.confirm("Xoá lịch sử proxy đã chạy cho từng bài? Lần sau sẽ chạy lại những cặp này.")) return;
+    const next = await self.sharedStore.update(function (store) {
+      store.proxyArticleDone = {};
+      return store;
+    }, { replaceDone: true });
+    renderDoneCount(next.proxyArticleDone);
+    setStatus("Đã xoá lịch sử đã chạy trong file chung.", false);
+  } catch (err) {
+    setStatus(err.message || "Không xoá được lịch sử.", true);
+  }
+});
+async function bindPlace(task) {
+  try {
+    await task();
+    await load();
+    setStatus("Đã gắn nơi lưu chung. Dữ liệu đọc và ghi từ đây.", false);
+  } catch (err) {
+    if (err && err.name === "AbortError") return;
+    setStatus(err.message || "Không chọn được nơi lưu.", true);
+  }
+}
+$("pickFile").addEventListener("click", () => bindPlace(() => self.sharedStore.chooseFile()));
+$("pickFolder").addEventListener("click", () => bindPlace(() => self.sharedStore.chooseDirectory()));
+$("grantAccess").addEventListener("click", () => bindPlace(() => self.sharedStore.requestAccess()));
+$("fetchProxies").addEventListener("click", () => fetchProxies());
+$("save").addEventListener("click", () => {
+  save().catch((err) => setStatus(err.message || "Không lưu được.", true));
+});
+
+async function refreshShared() {
+  try {
+    const place = await self.sharedStore.describe();
+    renderPlace(place);
+    if (!place.connected) return;
+    const data = await self.sharedStore.readData();
+    proxyHealth = data.proxyHealth && typeof data.proxyHealth === "object" ? data.proxyHealth : {};
+    renderProxyTable();
+    renderDoneCount(data.proxyArticleDone);
+    if (!formDirty && !formFocused()) applyConfig(data.config);
+  } catch (err) {
+    $("locationHint").textContent = err.message || "Không đọc được file dữ liệu.";
+  }
+}
+
+load().catch((err) => setStatus(err.message || "Không đọc được cấu hình.", true));
+setInterval(() => { refreshShared().catch(() => {}); }, 2000);

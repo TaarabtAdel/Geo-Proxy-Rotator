@@ -1,0 +1,7 @@
+https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/us/http.txt
+https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/us/socks4.txt|socks4
+https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/us/socks5.txt|socks5
+https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.txt
+https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/countries/US/data.txt
+https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all
+https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/us/data.json
