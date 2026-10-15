@@ -407,6 +407,24 @@ function sameSite(actualUrl, expectedUrl) {
   }
 }
 
+function articlePathKey(raw) {
+  try {
+    const url = new URL(raw);
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    return hostKey(url.hostname) + path;
+  } catch (err) {
+    return "";
+  }
+}
+
+// Tab còn đứng ở bài trước (cùng site) không được tính là bài đang mở đã tải xong.
+function isOtherListedArticle(actualUrl, expectedUrl, articles) {
+  const key = articlePathKey(actualUrl);
+  const expectedKey = articlePathKey(expectedUrl);
+  if (!key || key === expectedKey) return false;
+  return (articles || []).some((item) => articlePathKey(item) === key);
+}
+
 // Trang bài hợp lệ: http(s), không phải trang kiểm tra IP (kể cả redirect sang domain khác).
 function isArticlePageUrl(url) {
   if (!url || url === "about:blank" || url.startsWith("chrome-error://")) return false;
@@ -1788,6 +1806,7 @@ async function handleMainFrame(details, ok) {
 
   if (state.phase === "loading_article" || state.phase === "waiting") {
     if (isStaleNavigation(details, state)) return;
+    if (isOtherListedArticle(details.url, state.expectedUrl, state.snapshot && state.snapshot.articles)) return;
     const errorText = String(details.error || "");
     const isCertError = /ERR_CERT_AUTHORITY_INVALID/i.test(errorText);
     const isGenericChromeError = errorText === "chrome-error";
@@ -1810,6 +1829,17 @@ async function handleMainFrame(details, ok) {
     const fresh = await getState();
     if (fresh.nav !== state.nav) return;
     if (await maybeSkipBadArticle(fresh)) return;
+    if (fresh.phase === "waiting" && (!ok || isGenericChromeError)) {
+      const waitingError = fresh.articleError || (isGenericChromeError ? "" : errorText);
+      if (statusCode === 407 || isFatalProxyError(waitingError)) {
+        await failProxy("Mất kết nối proxy khi mở bài: " + (waitingError || "HTTP 407"), "error", state.gen);
+        return;
+      }
+      if (waitingError && waitingError !== "net::ERR_ABORTED" && waitingError !== "chrome-error") {
+        await goNextArticle(fresh.gen, "Bài không tải được: " + waitingError + " → chuyển bài tiếp.");
+      }
+      return;
+    }
     if (fresh.phase !== "loading_article") return;
 
     if (!ok || isGenericChromeError) {
@@ -2082,7 +2112,9 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
       return;
     }
     // Một số trang qua proxy chậm không bao giờ "complete" hết tài nguyên; vẫn coi tab complete là đủ.
+    // Không nhận complete của bài vừa rời, kẻo bài mới bị tính là tải xong.
     if (state.phase === "loading_article" && isArticlePageUrl(url)) {
+      if (isOtherListedArticle(url, state.expectedUrl, state.snapshot && state.snapshot.articles)) return;
       const reason = articleSkipReason(state.articleStatus, state.articleError);
       if (reason) {
         if (await maybeSkipBadArticle(state)) return;
