@@ -2,12 +2,19 @@ const $ = (id) => document.getElementById(id);
 
 const API_SOURCE = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all";
 const JSDELIVR_SOURCE = "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/us/data.json";
-const DEFAULT_SOURCE = API_SOURCE + "\n" + JSDELIVR_SOURCE;
+const LEGACY_SOURCE = API_SOURCE + "\n" + JSDELIVR_SOURCE;
+const DEFAULT_SOURCE = self.DEFAULT_PROXY_SOURCES || LEGACY_SOURCE;
 
 function normalizeSources(text) {
   const trimmed = String(text || "").trim();
-  if (!trimmed || trimmed === API_SOURCE) return DEFAULT_SOURCE;
+  if (!trimmed || trimmed === API_SOURCE || trimmed === LEGACY_SOURCE) return DEFAULT_SOURCE;
   return trimmed;
+}
+
+async function fillProxySources() {
+  const text = await self.readProxySources();
+  if (!formDirty && !formFocused()) $("sourceUrl").value = text;
+  return text;
 }
 
 function parseSourceLine(raw) {
@@ -131,9 +138,11 @@ function renderPlace(place) {
   $("grantAccess").disabled = !place || !place.kind;
 }
 
-function applyConfig(config) {
+function applyConfig(config, options) {
   const data = config || {};
-  $("sourceUrl").value = normalizeSources(data.proxySourceUrl || DEFAULT_SOURCE);
+  if (!options || !options.keepSource) {
+    $("sourceUrl").value = normalizeSources(data.proxySourceUrl || DEFAULT_SOURCE);
+  }
   $("proxyText").value = data.proxyText || "";
   $("articleText").value = data.articleText || "";
   $("waitMin").value = String(data.waitMinSec ?? 100);
@@ -363,6 +372,7 @@ async function save() {
 }
 
 async function load() {
+  await fillProxySources();
   const place = await self.sharedStore.describe();
   renderPlace(place);
   if (!place.connected) {
@@ -373,7 +383,7 @@ async function load() {
     return;
   }
   const data = await self.sharedStore.readData();
-  applyConfig(data.config);
+  applyConfig(data.config, { keepSource: true });
   localProfileId = await ensureProfileId();
   proxyHealth = data.proxyHealth && typeof data.proxyHealth === "object" ? data.proxyHealth : {};
   proxyLease = data.proxyLease && typeof data.proxyLease === "object" ? data.proxyLease : {};
@@ -532,7 +542,7 @@ async function refreshShared() {
     if (!localProfileId) localProfileId = await ensureProfileId();
     renderProxyTable();
     renderDoneCount(data.proxyArticleDone);
-    if (!formDirty && !formFocused()) applyConfig(data.config);
+    if (!formDirty && !formFocused()) applyConfig(data.config, { keepSource: true });
   } catch (err) {
     $("locationHint").textContent = err.message || "Không đọc được file dữ liệu.";
   }

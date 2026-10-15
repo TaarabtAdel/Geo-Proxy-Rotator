@@ -7,3 +7,4 @@ https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=100
 https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/us/data.json
 https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=US&ssl=all&anonymity=all|socks5
 https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=US&ssl=all&anonymity=all|socks4
+https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&country=us

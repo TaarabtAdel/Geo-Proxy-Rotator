@@ -28,10 +28,10 @@
       <h2>Danh sách proxy</h2>
       <label for="sourceUrl">URL nguồn proxy USA (mỗi dòng một nguồn)</label>
       <div class="row">
-        <textarea id="sourceUrl" rows="3" spellcheck="false" autocomplete="off"></textarea>
+        <textarea id="sourceUrl" rows="10" spellcheck="false" autocomplete="off"></textarea>
         <button id="fetchProxies" type="button">Lấy proxy USA miễn phí</button>
       </div>
-      <p class="hint">Nút lấy danh sách gộp mọi URL bên trên. Dòng <code>LINK|socks4</code> ra <code>socks4://ip:port</code>, <code>LINK|socks5</code> ra <code>socks5://ip:port</code>, dòng không hậu tố giữ nguyên <code>ip:port</code> (hoặc protocol có sẵn trong dữ liệu). Proxy viết tay: <code>ip:port</code>, <code>ip:port:user:pass</code>, <code>socks4://ip:port</code> hoặc <code>socks5://ip:port</code>. Cột <strong>Trạng thái</strong> cập nhật khi rotator đang chạy: Live, Không, Đang thử, Đang dùng hoặc Bận. Proxy đang Bận là profile khác đang mở, profile này sẽ bỏ qua cho đến khi profile kia dùng xong.</p>
+      <p class="hint">Ô này nạp từ <code>list-proxy.txt</code> khi mở Cài đặt. Không đọc được file thì dùng sẵn danh sách đó. Nút lấy danh sách gộp mọi URL bên trên. Dòng <code>LINK|socks4</code> ra <code>socks4://ip:port</code>, <code>LINK|socks5</code> ra <code>socks5://ip:port</code>, dòng không hậu tố giữ nguyên <code>ip:port</code> (hoặc protocol có sẵn trong dữ liệu). Proxy viết tay: <code>ip:port</code>, <code>ip:port:user:pass</code>, <code>socks4://ip:port</code> hoặc <code>socks5://ip:port</code>. Cột <strong>Trạng thái</strong> cập nhật khi rotator đang chạy: Live, Không, Đang thử, Đang dùng hoặc Bận. Proxy đang Bận là profile khác đang mở, profile này sẽ bỏ qua cho đến khi profile kia dùng xong.</p>
 
       <label for="proxyText">Thêm, sửa hoặc xoá proxy thủ công</label>
       <textarea id="proxyText" rows="8" spellcheck="false" placeholder="1.2.3.4:8080&#10;socks5://5.6.7.8:1080&#10;9.9.9.9:3128:user:pass"></textarea>
@@ -123,6 +123,7 @@
       <p id="status" role="status"></p>
     </div>
   </main>
+  <script src="data/proxy-sources.js"></script>
   <script src="data/parse_proxy.js"></script>
   <script src="data/shared-store.js"></script>
   <script src="options.js"></script>

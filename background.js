@@ -1,7 +1,7 @@
 // Geo Proxy Rotator — service worker MV3.
 // Luồng: đặt proxy HTTP -> mở tab kiểm tra IP -> giả lập toạ độ/múi giờ -> mở lần lượt bài viết.
 // Trạng thái chạy nằm trong chrome.storage.session để khôi phục khi service worker bị tắt giữa chừng.
-importScripts("data/us_locations.js", "data/parse_proxy.js", "data/shared-store.js");
+importScripts("data/us_locations.js", "data/parse_proxy.js", "data/proxy-sources.js", "data/shared-store.js");
 
 const CHECK_HOST = "api.ipify.org";
 const CHECK_URL = "https://api.ipify.org?format=json";
@@ -15,7 +15,7 @@ const ALARM_BUSY = "gpr-busy";
 const ALARM_SPOOF = "gpr-spoof";
 const API_SOURCE = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all";
 const JSDELIVR_SOURCE = "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/us/data.json";
-const DEFAULT_SOURCE = API_SOURCE + "\n" + JSDELIVR_SOURCE;
+const DEFAULT_SOURCE = self.DEFAULT_PROXY_SOURCES || (API_SOURCE + "\n" + JSDELIVR_SOURCE);
 
 const PHASE_LABEL = {
   idle: "Sẵn sàng",
