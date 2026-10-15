@@ -254,6 +254,7 @@ function renderProxyTable() {
     button.textContent = button.dataset.label + " " + count;
   });
   const shown = statusFilter ? (counts[statusFilter] || 0) : proxies.length;
+  $("copyProxies").disabled = shown === 0;
   $("proxyCount").textContent = statusFilter
     ? shown + " / " + proxies.length + " proxy"
     : proxies.length + " proxy hợp lệ";
@@ -461,6 +462,27 @@ for (const id of ["sourceUrl", "waitMin", "waitMax", "timeout", "articleTimeout"
 for (const id of ["scrollEnabled", "scrollSpeed", "loop"]) {
   $(id).addEventListener("change", () => { formDirty = true; });
 }
+function filteredProxyLines() {
+  const { proxies } = currentProxies();
+  return proxies
+    .filter((proxy) => !statusFilter || healthView(proxy).text === statusFilter)
+    .map((proxy) => self.proxyToLine(proxy));
+}
+
+$("copyProxies").addEventListener("click", () => {
+  const lines = filteredProxyLines();
+  if (!lines.length) {
+    setStatus("Không có proxy để copy.", true);
+    return;
+  }
+  const text = lines.join("\n");
+  navigator.clipboard.writeText(text).then(() => {
+    const label = statusFilter || "Tất cả";
+    setStatus("Đã copy " + lines.length + " proxy (" + label + "), mỗi dòng một proxy.", false);
+  }).catch(() => {
+    setStatus("Không copy được danh sách.", true);
+  });
+});
 $("proxyFilters").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-status]");
   if (!button) return;
