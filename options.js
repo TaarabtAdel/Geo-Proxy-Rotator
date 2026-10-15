@@ -131,13 +131,35 @@ function setStatus(text, isError) {
 }
 
 let proxyHealth = {};
+let proxyLease = {};
+let localProfileId = "";
+let proxyStamp = null;
+
+async function ensureProfileId() {
+  const stored = await chrome.storage.local.get("profileId");
+  if (stored.profileId) return String(stored.profileId);
+  const id = crypto.randomUUID();
+  await chrome.storage.local.set({ profileId: id });
+  return id;
+}
 
 function proxyRowKey(proxy) {
   return self.proxyKey(proxy);
 }
 
 function healthView(proxy) {
-  const entry = proxyHealth[proxyRowKey(proxy)];
+  const key = proxyRowKey(proxy);
+  const entry = proxyHealth[key];
+  const lease = proxyLease[key];
+  if (self.sharedStore.leaseFresh(lease)) {
+    const mine = Boolean(localProfileId && lease.owner === localProfileId);
+    const ip = entry && entry.ip ? " · IP " + entry.ip : "";
+    return {
+      text: mine ? "Đang dùng" : "Bận",
+      className: "status-busy",
+      title: (mine ? "Profile này đang mở proxy" : "Profile khác đang dùng, profile này tạm bỏ qua") + ip
+    };
+  }
   if (!entry || !entry.status || entry.status === "unknown") {
     return { text: "Chưa thử", className: "status-unknown", title: "" };
   }
@@ -185,7 +207,13 @@ function renderProxyTable() {
   $("proxyHint").textContent = hints.join(" ");
 
   const body = $("proxyTable");
-  body.replaceChildren();
+  const stamp = String(proxies.length) + "\n" + proxies.map((proxy) => {
+    const health = healthView(proxy);
+    return health.text + "\t" + health.title;
+  }).join("\n");
+  if (stamp === proxyStamp) return;
+  proxyStamp = stamp;
+  const rows = [];
   proxies.forEach((proxy, index) => {
     const row = document.createElement("tr");
     const cells = [
@@ -216,8 +244,10 @@ function renderProxyTable() {
     button.dataset.index = String(index);
     action.append(button);
     row.append(action);
-    body.append(row);
+    rows.push(row);
   });
+  body.replaceChildren();
+  rows.forEach((row) => body.append(row));
   if (!proxies.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
@@ -317,7 +347,9 @@ async function load() {
   }
   const data = await self.sharedStore.readData();
   applyConfig(data.config);
+  localProfileId = await ensureProfileId();
   proxyHealth = data.proxyHealth && typeof data.proxyHealth === "object" ? data.proxyHealth : {};
+  proxyLease = data.proxyLease && typeof data.proxyLease === "object" ? data.proxyLease : {};
   formDirty = false;
   renderProxyTable();
   renderArticleHint();
@@ -388,18 +420,36 @@ $("proxyTable").addEventListener("click", (event) => {
   formDirty = true;
   renderProxyTable();
 });
+$("clearHealth").addEventListener("click", async () => {
+  if (!window.confirm("Xoá trạng thái Live / Không của mọi proxy? Proxy đang bận vẫn bị profile khác giữ.")) return;
+  proxyHealth = {};
+  proxyStamp = null;
+  renderProxyTable();
+  try {
+    await self.sharedStore.update(function (store) {
+      store.proxyHealth = {};
+      return store;
+    }, { replaceHealth: true });
+    setStatus("Đã xoá trạng thái proxy trong file chung.", false);
+  } catch (err) {
+    setStatus(err.message || "Không xoá được trạng thái.", true);
+  }
+});
 $("clearProxies").addEventListener("click", async () => {
   if ($("proxyText").value.trim() && !window.confirm("Xoá toàn bộ danh sách proxy trên trang này?")) return;
   $("proxyText").value = "";
   proxyHealth = {};
+  proxyLease = {};
+  proxyStamp = null;
   renderProxyTable();
   try {
     await self.sharedStore.update(function (store) {
       store.config.proxyText = "";
       store.config.proxies = [];
       store.proxyHealth = {};
+      store.proxyLease = {};
       return store;
-    }, { replaceHealth: true });
+    }, { replaceHealth: true, replaceLease: true });
     formDirty = true;
     setStatus("Đã xoá danh sách proxy trong file chung.", false);
   } catch (err) {
@@ -451,6 +501,8 @@ async function refreshShared() {
     if (!place.connected) return;
     const data = await self.sharedStore.readData();
     proxyHealth = data.proxyHealth && typeof data.proxyHealth === "object" ? data.proxyHealth : {};
+    proxyLease = data.proxyLease && typeof data.proxyLease === "object" ? data.proxyLease : {};
+    if (!localProfileId) localProfileId = await ensureProfileId();
     renderProxyTable();
     renderDoneCount(data.proxyArticleDone);
     if (!formDirty && !formFocused()) applyConfig(data.config);
@@ -460,4 +512,4 @@ async function refreshShared() {
 }
 
 load().catch((err) => setStatus(err.message || "Không đọc được cấu hình.", true));
-setInterval(() => { refreshShared().catch(() => {}); }, 2000);
+setInterval(() => { refreshShared().catch(() => {}); }, 4000);

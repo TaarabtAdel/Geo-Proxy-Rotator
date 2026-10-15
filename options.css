@@ -151,6 +151,7 @@ code { font-size: 12px; }
 .status-live { background: #d9f5e8; color: #067647; }
 .status-dead { background: #fde8e8; color: #9f2d2d; }
 .status-pending { background: #fff4d6; color: #9a6700; }
+.status-busy { background: #e7eefe; color: #1d4e89; }
 .status-unknown { background: #eef2f0; color: #5d6f66; }
 
 @media (max-width: 720px) {

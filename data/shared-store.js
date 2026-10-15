@@ -7,8 +7,12 @@
   const DB_STORE = "handles";
   const DB_KEY = "location";
 
-  const FILE_IO_MS = 4000;
+  const FILE_IO_MS = 12000;
+  // Proxy đang được một profile dùng. Hết hạn nếu profile đó không gia hạn (service worker chết).
+  const LEASE_MS = 180000;
   let queue = Promise.resolve();
+  let cacheText = null;
+  let cacheData = null;
 
   function withTimeout(promise, ms) {
     return new Promise(function (resolve, reject) {
@@ -34,9 +38,9 @@
 
   function enqueue(task) {
     const job = queue.then(function () {
-      return withTimeout(Promise.resolve().then(task), 20000);
+      return withTimeout(Promise.resolve().then(task), 45000);
     }, function () {
-      return withTimeout(Promise.resolve().then(task), 20000);
+      return withTimeout(Promise.resolve().then(task), 45000);
     });
     queue = job.then(function () {}, function () {});
     return job;
@@ -48,12 +52,22 @@
       savedAt: 0,
       config: {},
       proxyHealth: {},
-      proxyArticleDone: {}
+      proxyArticleDone: {},
+      proxyLease: {}
     };
   }
 
-  function clone(value) {
-    return JSON.parse(JSON.stringify(value));
+  // Copy nông: file có hàng nghìn proxy, JSON clone cả cục sẽ làm service worker khựng.
+  function shell(data) {
+    const src = data || emptyData();
+    return {
+      version: 1,
+      savedAt: Number(src.savedAt) || 0,
+      config: Object.assign({}, src.config || {}),
+      proxyHealth: Object.assign({}, src.proxyHealth || {}),
+      proxyArticleDone: Object.assign({}, src.proxyArticleDone || {}),
+      proxyLease: Object.assign({}, src.proxyLease || {})
+    };
   }
 
   function openDb() {
@@ -143,7 +157,7 @@
   function looksLikeStore(raw) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
     if (!Object.keys(raw).length) return true;
-    return raw.version === 1 || Object.prototype.hasOwnProperty.call(raw, "config") || Object.prototype.hasOwnProperty.call(raw, "proxyHealth") || Object.prototype.hasOwnProperty.call(raw, "proxyArticleDone");
+    return raw.version === 1 || Object.prototype.hasOwnProperty.call(raw, "config") || Object.prototype.hasOwnProperty.call(raw, "proxyHealth") || Object.prototype.hasOwnProperty.call(raw, "proxyArticleDone") || Object.prototype.hasOwnProperty.call(raw, "proxyLease");
   }
 
   function normalize(raw) {
@@ -154,6 +168,7 @@
     data.config = raw.config && typeof raw.config === "object" ? raw.config : {};
     data.proxyHealth = raw.proxyHealth && typeof raw.proxyHealth === "object" && !Array.isArray(raw.proxyHealth) ? raw.proxyHealth : {};
     data.proxyArticleDone = raw.proxyArticleDone && typeof raw.proxyArticleDone === "object" && !Array.isArray(raw.proxyArticleDone) ? raw.proxyArticleDone : {};
+    data.proxyLease = raw.proxyLease && typeof raw.proxyLease === "object" && !Array.isArray(raw.proxyLease) ? raw.proxyLease : {};
     return data;
   }
 
@@ -161,7 +176,7 @@
     const config = data.config || {};
     const hasProxy = String(config.proxyText || "").trim() || (Array.isArray(config.proxies) && config.proxies.length);
     const hasArticle = String(config.articleText || "").trim() || (Array.isArray(config.articles) && config.articles.length);
-    return !hasProxy && !hasArticle && !Object.keys(data.proxyHealth || {}).length && !Object.keys(data.proxyArticleDone || {}).length;
+    return !hasProxy && !hasArticle && !Object.keys(data.proxyHealth || {}).length && !Object.keys(data.proxyArticleDone || {}).length && !Object.keys(data.proxyLease || {}).length;
   }
 
   async function readLegacy() {
@@ -194,7 +209,12 @@
     if (!handle) return emptyData();
     const file = await withTimeout(handle.getFile(), FILE_IO_MS);
     const text = await withTimeout(file.text(), FILE_IO_MS);
-    if (!String(text || "").trim()) return emptyData();
+    if (text === cacheText && cacheData) return cacheData;
+    if (!String(text || "").trim()) {
+      cacheText = text;
+      cacheData = emptyData();
+      return cacheData;
+    }
     let parsed;
     try {
       parsed = JSON.parse(text);
@@ -204,7 +224,9 @@
     if (!looksLikeStore(parsed)) {
       throw new Error("File này không phải dữ liệu Geo Proxy. Chọn file trống hoặc để thư mục tự tạo geo-proxy-data.json.");
     }
-    return normalize(parsed);
+    cacheText = text;
+    cacheData = normalize(parsed);
+    return cacheData;
   }
 
   async function writeData(data) {
@@ -214,14 +236,17 @@
     if (!handle) throw new Error("Không tạo được file " + FILE_NAME + " trong thư mục đã chọn.");
     const payload = normalize(data);
     payload.savedAt = Date.now();
+    const body = JSON.stringify(payload, null, 2);
     const writable = await withTimeout(handle.createWritable(), FILE_IO_MS);
     try {
-      await withTimeout(writable.write(JSON.stringify(payload, null, 2)), FILE_IO_MS);
+      await withTimeout(writable.write(body), FILE_IO_MS);
       await withTimeout(writable.close(), FILE_IO_MS);
     } catch (err) {
       try { await writable.abort(); } catch (abortErr) { /* bỏ khóa ghi nếu còn. */ }
       throw err;
     }
+    cacheText = body;
+    cacheData = payload;
     return payload;
   }
 
@@ -242,27 +267,56 @@
     return out;
   }
 
-  function healthRank(status) {
-    if (status === "dead") return 3;
-    if (status === "live") return 2;
-    if (status === "pending") return 1;
-    return 0;
+  function leaseFresh(lease, now) {
+    if (!lease || !lease.owner) return false;
+    return (Number(now) || Date.now()) - Number(lease.claimedAt || 0) < LEASE_MS;
   }
 
-  function mergeHealth(left, right) {
-    const out = Object.assign({}, left || {});
-    Object.keys(right || {}).forEach(function (key) {
+  // Bản ghi mới hơn thắng. Profile khác không được ghi đè proxy đang có người giữ.
+  function mergeHealth(latestHealth, mutatedHealth, leaseMap, now) {
+    const out = Object.assign({}, latestHealth || {});
+    Object.keys(mutatedHealth || {}).forEach(function (key) {
       const prev = out[key];
-      const next = right[key];
-      if (!next) return;
+      const next = mutatedHealth[key];
+      if (!next || !next.status) return;
+      const lease = leaseMap && leaseMap[key];
+      if (leaseFresh(lease, now) && next.owner && next.owner !== lease.owner) return;
       if (!prev) {
         out[key] = next;
         return;
       }
-      const prevRank = healthRank(prev.status);
-      const nextRank = healthRank(next.status);
-      if (nextRank < prevRank) return;
-      if (nextRank > prevRank || Number(next.updatedAt) >= Number(prev.updatedAt || 0)) out[key] = next;
+      const nextAt = Number(next.updatedAt) || 0;
+      const prevAt = Number(prev.updatedAt) || 0;
+      if (next.status === "pending" && prev.status !== "pending" && nextAt <= prevAt) return;
+      if (nextAt >= prevAt) out[key] = next;
+    });
+    return out;
+  }
+
+  function mergeLease(latest, before, after, now) {
+    const out = {};
+    const keys = {};
+    [latest, before, after].forEach(function (map) {
+      Object.keys(map || {}).forEach(function (key) { keys[key] = true; });
+    });
+    Object.keys(keys).forEach(function (key) {
+      const disk = latest && latest[key];
+      const prev = before && before[key];
+      const next = after && after[key];
+      const changed = JSON.stringify(prev || null) !== JSON.stringify(next || null);
+      let pick = disk || null;
+      if (changed) {
+        if (!next) {
+          const sameHeld = disk && prev && disk.owner === prev.owner && Number(disk.claimedAt) <= Number(prev.claimedAt) + 2000;
+          pick = sameHeld ? null : (disk || null);
+        } else if (!disk || !leaseFresh(disk, now) || disk.owner === next.owner) {
+          if (disk && disk.owner === next.owner && Number(disk.claimedAt) > Number(next.claimedAt)) pick = disk;
+          else pick = next;
+        } else {
+          pick = disk;
+        }
+      }
+      if (leaseFresh(pick, now)) out[key] = { owner: String(pick.owner), claimedAt: Number(pick.claimedAt) || now };
     });
     return out;
   }
@@ -271,7 +325,14 @@
     const patch = {};
     const keys = new Set(Object.keys(before || {}).concat(Object.keys(after || {})));
     keys.forEach(function (key) {
-      if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) patch[key] = after[key];
+      const left = before ? before[key] : undefined;
+      const right = after ? after[key] : undefined;
+      if (left === right) return;
+      if (left && right && typeof left === "object" && typeof right === "object") {
+        if (JSON.stringify(left) !== JSON.stringify(right)) patch[key] = right;
+        return;
+      }
+      patch[key] = right;
     });
     return patch;
   }
@@ -280,16 +341,20 @@
     const mode = flags || {};
     return enqueue(async function () {
       const current = await readData();
-      const draft = clone(current);
+      const draft = shell(current);
       const mutated = (await mutator(draft)) || draft;
       const latest = await readData();
-      const next = clone(mutated);
+      const now = Date.now();
+      const next = shell(latest);
       next.proxyArticleDone = mode.replaceDone
         ? (mutated.proxyArticleDone || {})
         : unionDone(latest.proxyArticleDone, mutated.proxyArticleDone);
+      next.proxyLease = mode.replaceLease
+        ? (mutated.proxyLease || {})
+        : mergeLease(latest.proxyLease, current.proxyLease, mutated.proxyLease, now);
       next.proxyHealth = mode.replaceHealth
         ? (mutated.proxyHealth || {})
-        : mergeHealth(latest.proxyHealth, mutated.proxyHealth);
+        : mergeHealth(latest.proxyHealth, mutated.proxyHealth, next.proxyLease, now);
       next.config = Object.assign({}, latest.config || {}, changedFields(current.config, mutated.config));
       return writeData(next);
     });
@@ -374,6 +439,8 @@
   root.sharedStore = {
     FILE_NAME: FILE_NAME,
     emptyData: emptyData,
+    LEASE_MS: LEASE_MS,
+    leaseFresh: leaseFresh,
     describe: describe,
     chooseFile: chooseFile,
     chooseDirectory: chooseDirectory,

@@ -11,6 +11,7 @@ const ALARM_CHECK = "gpr-check";
 const ALARM_LOAD = "gpr-load";
 const ALARM_WATCH = "gpr-watch";
 const ALARM_SWITCH = "gpr-switch";
+const ALARM_BUSY = "gpr-busy";
 const ALARM_SPOOF = "gpr-spoof";
 const API_SOURCE = "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=US&ssl=all&anonymity=all";
 const JSDELIVR_SOURCE = "https://cdn.jsdelivr.net/gh/proxyscrape/free-proxy-list@main/proxies/countries/us/data.json";
@@ -44,7 +45,12 @@ let lock = Promise.resolve();
 let flow = Promise.resolve();
 const probeScheduled = new Set();
 let doneMap = null;
+let doneMapAt = 0;
 let healthMap = null;
+let profileKey = "";
+let heldKey = "";
+let heldTouchAt = 0;
+let openingProxy = false;
 
 function defaultState() {
   return {
@@ -142,6 +148,23 @@ function proxyStorageKey(proxy) {
   return self.proxyKey ? self.proxyKey(proxy) : proxy.host + ":" + proxy.port;
 }
 
+async function profileId() {
+  if (profileKey) return profileKey;
+  const stored = await chrome.storage.local.get("profileId");
+  if (stored.profileId) {
+    profileKey = String(stored.profileId);
+    return profileKey;
+  }
+  profileKey = crypto.randomUUID();
+  await chrome.storage.local.set({ profileId: profileKey });
+  return profileKey;
+}
+
+function rememberDoneCache(map) {
+  doneMap = map && typeof map === "object" && !Array.isArray(map) ? map : {};
+  doneMapAt = Date.now();
+}
+
 async function readProxyHealthMap() {
   const data = await self.sharedStore.readData();
   healthMap = data.proxyHealth || {};
@@ -151,11 +174,13 @@ async function readProxyHealthMap() {
 async function setProxyHealth(proxy, status, extra) {
   if (!proxy) return;
   const key = proxyStorageKey(proxy);
+  const owner = await profileId();
   const saved = await self.sharedStore.update(function (data) {
     const prev = data.proxyHealth[key] || {};
     data.proxyHealth[key] = {
       status: status,
       updatedAt: Date.now(),
+      owner: owner,
       ip: extra && extra.ip ? String(extra.ip) : (prev.ip || ""),
       note: extra && extra.note ? String(extra.note).slice(0, 160) : (prev.note || "")
     };
@@ -164,15 +189,120 @@ async function setProxyHealth(proxy, status, extra) {
   healthMap = saved && saved.proxyHealth ? saved.proxyHealth : healthMap;
 }
 
+async function releaseKey(key) {
+  if (!key) return;
+  const owner = await profileId();
+  if (heldKey === key) heldKey = "";
+  try {
+    await self.sharedStore.update(function (data) {
+      const lease = data.proxyLease && data.proxyLease[key];
+      if (lease && lease.owner === owner) delete data.proxyLease[key];
+      return data;
+    });
+  } catch (err) {
+    report(err);
+  }
+}
+
+async function releaseHeld() {
+  await releaseKey(heldKey);
+}
+
+async function touchHeld() {
+  if (!heldKey) return;
+  if (Date.now() - heldTouchAt < 60000) return;
+  const key = heldKey;
+  const owner = await profileId();
+  heldTouchAt = Date.now();
+  try {
+    await self.sharedStore.update(function (data) {
+      const lease = data.proxyLease && data.proxyLease[key];
+      if (!lease || lease.owner !== owner) return data;
+      data.proxyLease[key] = { owner: owner, claimedAt: Date.now() };
+      return data;
+    });
+  } catch (err) {
+    heldTouchAt = 0;
+    report(err);
+  }
+}
+
+// Giữ đúng proxy đang mở. Profile khác thấy lease còn hạn thì bỏ qua.
+async function takeProxy(proxies, start, articles) {
+  const owner = await profileId();
+  const now = Date.now();
+  const leaseMs = self.sharedStore.LEASE_MS || 180000;
+  let chosen = -1;
+  let skippedDead = 0;
+  let skippedDone = 0;
+  let skippedBusy = 0;
+  let lost = false;
+  const saved = await self.sharedStore.update(function (data) {
+    if (!data.proxyLease || typeof data.proxyLease !== "object" || Array.isArray(data.proxyLease)) data.proxyLease = {};
+    const order = [];
+    for (let i = start; i < proxies.length; i++) order.push(i);
+    for (let i = 0; i < start; i++) order.push(i);
+    for (const i of order) {
+      const proxy = proxies[i];
+      const key = proxyStorageKey(proxy);
+      if (isDeadProxy(data.proxyHealth, proxy)) {
+        skippedDead += 1;
+        continue;
+      }
+      if (!pendingPairExists([proxy], articles, data.proxyArticleDone || {})) {
+        skippedDone += 1;
+        continue;
+      }
+      const lease = data.proxyLease[key];
+      if (lease && lease.owner !== owner && now - Number(lease.claimedAt || 0) < leaseMs) {
+        skippedBusy += 1;
+        continue;
+      }
+      const prev = data.proxyHealth[key] || {};
+      data.proxyHealth[key] = {
+        status: "pending",
+        updatedAt: now,
+        owner: owner,
+        ip: prev.ip || "",
+        note: "Đang dùng"
+      };
+      data.proxyLease[key] = { owner: owner, claimedAt: now };
+      chosen = i;
+      return data;
+    }
+    return data;
+  });
+  if (chosen >= 0) {
+    const key = proxyStorageKey(proxies[chosen]);
+    const lease = saved.proxyLease && saved.proxyLease[key];
+    if (!lease || lease.owner !== owner) {
+      lost = true;
+      chosen = -1;
+    } else if (heldKey && heldKey !== key) {
+      const prev = heldKey;
+      heldKey = key;
+      heldTouchAt = now;
+      await releaseKey(prev);
+    } else {
+      heldKey = key;
+      heldTouchAt = now;
+    }
+  }
+  if (saved && saved.proxyHealth) healthMap = saved.proxyHealth;
+  if (saved && saved.proxyArticleDone) rememberDoneCache(saved.proxyArticleDone);
+  return { chosen: chosen, skippedDead: skippedDead, skippedDone: skippedDone, skippedBusy: skippedBusy, lost: lost };
+}
+
 function isDeadProxy(health, proxy) {
   const entry = health && health[proxyStorageKey(proxy)];
   return Boolean(entry && entry.status === "dead");
 }
 
 async function ensureDoneMap() {
+  if (doneMap && Date.now() - doneMapAt < 8000) return doneMap;
   const data = await self.sharedStore.readData();
-  const raw = data.proxyArticleDone;
-  doneMap = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+  rememberDoneCache(data.proxyArticleDone);
+  healthMap = data.proxyHealth || healthMap;
   return doneMap;
 }
 
@@ -380,6 +510,12 @@ function isOurMainFrame(details) {
 function isProxyNetError(error) {
   const text = String(error || "");
   return /ERR_PROXY_|ERR_TUNNEL_|ERR_SOCKS_|ERR_CONNECTION_|ERR_TIMED_OUT|ERR_EMPTY_RESPONSE|ERR_ADDRESS_UNREACHABLE|ERR_NAME_NOT_RESOLVED|ERR_INTERNET_DISCONNECTED|ERR_TOO_MANY_RETRIES|ERR_FAILED/.test(text);
+}
+
+// Chỉ những lỗi này chứng tỏ proxy chết. Lỗi mạng lẻ của tab khác không được tính.
+function isFatalProxyError(error) {
+  const text = String(error || "");
+  return /ERR_PROXY_CONNECTION_FAILED|ERR_TUNNEL_CONNECTION_FAILED|ERR_PROXY_CERTIFICATE_INVALID|ERR_PROXY_AUTH_UNSUPPORTED|ERR_PROXY_AUTH_REQUESTED|ERR_MANDATORY_PROXY_CONFIGURATION_FAILED/.test(text);
 }
 
 function articleSkipReason(status, error) {
@@ -806,135 +942,136 @@ async function beginRun(gen) {
 
 async function openProxy(index, gen) {
   if (!still(gen)) return;
-  const state = await getState();
-  if (!state.running || state.gen !== gen || !state.snapshot) return;
-  const proxies = state.snapshot.proxies;
-  if (index >= proxies.length) {
-    await finishProxyList(gen, state.snapshot.loop);
-    return;
-  }
-  await enterSwitching(gen, index);
-  if (!still(gen)) return;
-
-  let done = doneMap || {};
-  let health = healthMap || {};
+  if (openingProxy) return;
+  openingProxy = true;
   try {
-    done = await ensureDoneMap();
-    health = await readProxyHealthMap();
-  } catch (err) {
-    report(err);
-    await addLog("error", "Không đọc được file dữ liệu, vẫn chuyển proxy.");
-  }
-  let cursor = index;
-  let skippedDone = 0;
-  let skippedDead = 0;
-  while (cursor < proxies.length) {
-    const candidate = proxies[cursor];
-    if (isDeadProxy(health, candidate)) {
-      skippedDead += 1;
-      cursor += 1;
-      continue;
+    const state = await getState();
+    if (!state.running || state.gen !== gen || !state.snapshot) return;
+    const proxies = state.snapshot.proxies;
+    if (index >= proxies.length) {
+      openingProxy = false;
+      await finishProxyList(gen, state.snapshot.loop);
+      return;
     }
-    if (!pendingPairExists([candidate], state.snapshot.articles, done)) {
-      skippedDone += 1;
-      cursor += 1;
-      continue;
+    // Quét file lớn không được tính vào hạn chuyển proxy, kẻo đang chọn đã bị nhảy proxy.
+    await enterSwitching(gen, index, 90000);
+    if (!still(gen)) return;
+
+    let picked = null;
+    try {
+      for (let attempt = 0; attempt < 4 && still(gen); attempt += 1) {
+        picked = await takeProxy(proxies, index, state.snapshot.articles);
+        if (!picked.lost) break;
+      }
+    } catch (err) {
+      report(err);
+      await addLog("error", "Không đọc được file dữ liệu, thử lại sau 20 giây.");
+      await scheduleProxyRetry(gen, index);
+      return;
     }
-    break;
-  }
-  if (cursor >= proxies.length) {
-    const runnable = proxies.some((proxy) => !isDeadProxy(health, proxy) && pendingPairExists([proxy], state.snapshot.articles, done));
-    if (!runnable) {
+    if (!picked || picked.chosen < 0) {
+      if (picked && (picked.skippedBusy || picked.lost)) {
+        await addLog("info", "Proxy còn bài đang bận ở profile khác. Thử lại sau 20 giây.");
+        await scheduleProxyRetry(gen, index);
+        return;
+      }
       await stopInternal("Không còn proxy để thử. Proxy trạng thái Không bị bỏ qua, proxy khác đã chạy hết bài.");
       return;
     }
-    await finishProxyList(gen, state.snapshot.loop);
-    return;
+    if (picked.skippedDead) await addLog("info", "Bỏ qua " + picked.skippedDead + " proxy trạng thái Không.");
+    if (picked.skippedDone) await addLog("info", "Bỏ qua " + picked.skippedDone + " proxy đã chạy hết bài.");
+    if (picked.skippedBusy) await addLog("info", "Bỏ qua " + picked.skippedBusy + " proxy đang bận ở profile khác.");
+
+    const cursor = picked.chosen;
+    const proxy = proxies[cursor];
+    const label = formatProxy(proxy);
+    const nav = (state.nav || 0) + 1;
+    currentAuth = proxy.username ? { username: proxy.username, password: proxy.password || "" } : null;
+    authAttempts = 0;
+    await enterSwitching(gen, cursor);
+    if (!still(gen)) return;
+
+    await addLog("info", "Proxy " + (cursor + 1) + "/" + proxies.length + ": " + label);
+    await detachQuiet();
+    if (!still(gen)) return;
+
+    try {
+      await withTimeout(applyProxySettings(proxy, state.snapshot.bypass), 5000, "Quá hạn đặt proxy");
+    } catch (err) {
+      openingProxy = false;
+      await failProxy("Không đặt được proxy: " + (err.message || err), "error", gen, true);
+      return;
+    }
+    if (!still(gen)) return;
+    const fresh = await getState();
+    if (!fresh.running || fresh.gen !== gen || fresh.phase !== "switching") return;
+
+    const deadline = Date.now() + state.snapshot.proxyTimeoutSec * 1000;
+    await updateState((current) => {
+      if (current.gen !== gen) return current;
+      current.phase = "checking";
+      current.proxyIndex = cursor;
+      current.articleIndex = 0;
+      current.nav = nav;
+      current.currentProxy = label;
+      current.location = null;
+      current.expectedUrl = "";
+      current.nextArticleAt = null;
+      current.loadDeadline = null;
+      current.articleStatus = 0;
+      current.articleError = "";
+      current.navStartedAt = 0;
+      current.checkDeadline = deadline;
+      current.switchDeadline = null;
+      current.proxyAuth = currentAuth;
+      current.debuggerAttached = false;
+      return current;
+    });
+    if (!still(gen)) return;
+    clearSwitchTimer();
+    try {
+      await chrome.alarms.clear(ALARM_SWITCH);
+    } catch (err) {
+      report(err);
+    }
+    armCheckTimer(deadline, nav);
+    try {
+      await chrome.alarms.create(ALARM_CHECK, { when: deadline });
+    } catch (err) {
+      report(err);
+    }
+
+    // Chờ Chrome áp dụng proxy trước khi mở trang kiểm tra.
+    await delay(300);
+    if (!still(gen)) return;
+
+    const url = CHECK_URL + "&t=" + Date.now();
+    let tabId;
+    try {
+      tabId = await withTimeout(ensureTab(url), 8000, "Quá hạn mở tab kiểm tra");
+    } catch (err) {
+      openingProxy = false;
+      await failProxy("Không mở được tab kiểm tra: " + (err.message || err), "error", gen);
+      return;
+    }
+    await updateState((current) => {
+      if (current.gen !== gen || current.nav !== nav) return current;
+      current.tabId = tabId;
+      current.expectedUrl = url;
+      return current;
+    });
+  } finally {
+    openingProxy = false;
   }
-  if (skippedDead) await addLog("info", "Bỏ qua " + skippedDead + " proxy trạng thái Không.");
-  if (skippedDone) await addLog("info", "Bỏ qua " + skippedDone + " proxy đã chạy hết bài.");
+}
 
-  const proxy = proxies[cursor];
-  const label = formatProxy(proxy);
-  const nav = (state.nav || 0) + 1;
-  currentAuth = proxy.username ? { username: proxy.username, password: proxy.password || "" } : null;
-  authAttempts = 0;
-  if (cursor !== index) await enterSwitching(gen, cursor);
-  if (!still(gen)) return;
-
-  await addLog("info", "Proxy " + (cursor + 1) + "/" + proxies.length + ": " + label);
+async function scheduleProxyRetry(gen, index) {
+  await enterSwitching(gen, index, 90000);
   try {
-    await setProxyHealth(proxy, "pending");
+    await chrome.alarms.create(ALARM_BUSY, { when: Date.now() + 20000 });
   } catch (err) {
     report(err);
   }
-  await detachQuiet();
-  if (!still(gen)) return;
-
-  try {
-    await withTimeout(applyProxySettings(proxy, state.snapshot.bypass), 5000, "Quá hạn đặt proxy");
-  } catch (err) {
-    await failProxy("Không đặt được proxy: " + (err.message || err), "error", gen, true);
-    return;
-  }
-  if (!still(gen)) return;
-  const fresh = await getState();
-  if (!fresh.running || fresh.gen !== gen || fresh.phase !== "switching") return;
-
-  const deadline = Date.now() + state.snapshot.proxyTimeoutSec * 1000;
-  await updateState((current) => {
-    if (current.gen !== gen) return current;
-    current.phase = "checking";
-    current.proxyIndex = cursor;
-    current.articleIndex = 0;
-    current.nav = nav;
-    current.currentProxy = label;
-    current.location = null;
-    current.expectedUrl = "";
-    current.nextArticleAt = null;
-    current.loadDeadline = null;
-    current.articleStatus = 0;
-    current.articleError = "";
-    current.navStartedAt = 0;
-    current.checkDeadline = deadline;
-    current.switchDeadline = null;
-    current.proxyAuth = currentAuth;
-    current.debuggerAttached = false;
-    return current;
-  });
-  if (!still(gen)) return;
-  clearSwitchTimer();
-  try {
-    await chrome.alarms.clear(ALARM_SWITCH);
-  } catch (err) {
-    report(err);
-  }
-  armCheckTimer(deadline, nav);
-  try {
-    await chrome.alarms.create(ALARM_CHECK, { when: deadline });
-  } catch (err) {
-    report(err);
-  }
-
-  // Chờ Chrome áp dụng proxy trước khi mở trang kiểm tra.
-  await delay(300);
-  if (!still(gen)) return;
-
-  const url = CHECK_URL + "&t=" + Date.now();
-  let tabId;
-  try {
-    tabId = await withTimeout(ensureTab(url), 8000, "Quá hạn mở tab kiểm tra");
-  } catch (err) {
-    await failProxy("Không mở được tab kiểm tra: " + (err.message || err), "error", gen);
-    return;
-  }
-  await updateState((current) => {
-    if (current.gen !== gen || current.nav !== nav) return current;
-    current.tabId = tabId;
-    current.expectedUrl = url;
-    return current;
-  });
-  if (!still(gen)) return;
 }
 
 async function onCheckTimeout(nav) {
@@ -1017,6 +1154,12 @@ async function onSpoofTimeout(gen) {
   if (!state.running || state.gen !== gen || state.phase !== "spoofing") return;
   if (state.spoofDeadline && Date.now() + 200 < state.spoofDeadline) return;
   await clearSpoofDeadline();
+  // Proxy đã kết nối được thì hết hạn giả lập không được nhảy sang proxy khác.
+  if (state.location) {
+    await addLog("info", "Giả lập vị trí chậm, vẫn mở bài với proxy hiện tại.");
+    await loadArticle(state.articleIndex || 0, gen);
+    return;
+  }
   await failProxy("Giả lập vị trí quá hạn hoặc không hoàn thành", "timeout", gen);
 }
 
@@ -1024,6 +1167,7 @@ async function loadArticle(index, gen) {
   if (!still(gen)) return;
   const state = await getState();
   if (!state.running || state.gen !== gen || !state.snapshot) return;
+  await clearSpoofDeadline();
   await stopHumanScroll(state.tabId);
   const articles = state.snapshot.articles;
   const proxy = state.snapshot.proxies[state.proxyIndex];
@@ -1078,12 +1222,11 @@ async function loadArticle(index, gen) {
 
   const location = (await getState()).location;
   if (location) {
-    const budget = switchBudgetMs(state.snapshot);
+    const budget = Math.max(switchBudgetMs(state.snapshot), 30000);
     try {
       await withTimeout(prepareLocation(tabId, location, url, true), budget, "Quá hạn giả lập vị trí");
     } catch (err) {
-      await failProxy("Không giả lập được vị trí: " + (err.message || err), "error", gen);
-      return;
+      await addLog("info", "Không giả lập được vị trí, vẫn mở bài: " + (err.message || err));
     }
   } else {
     await failProxy("Thiếu vị trí giả lập", "error", gen);
@@ -1124,7 +1267,7 @@ async function onLoadTimeout(nav, forced) {
 
   const err = String(state.articleError || "");
   const status = Number(state.articleStatus) || 0;
-  if (status === 407 || (err && isProxyNetError(err))) {
+  if (status === 407 || (err && isFatalProxyError(err))) {
     await failProxy("Mất kết nối proxy khi mở bài: " + (err || "HTTP 407"), "error", state.gen);
     return;
   }
@@ -1153,16 +1296,15 @@ async function goNextArticle(gen, reason) {
   if (state.phase !== "waiting" && state.phase !== "loading_article") return false;
   const nav = state.nav;
   const index = state.articleIndex;
-  const spoofEnd = Date.now() + switchBudgetMs(state.snapshot);
   let claimed = false;
   await updateState((current) => {
     if (!current.running || current.gen !== gen) return current;
     if (current.nav !== nav || current.articleIndex !== index) return current;
     if (current.phase !== "waiting" && current.phase !== "loading_article") return current;
-    current.phase = "spoofing";
+    current.phase = "loading_article";
     current.nextArticleAt = null;
     current.loadDeadline = null;
-    current.spoofDeadline = spoofEnd;
+    current.spoofDeadline = null;
     claimed = true;
     return current;
   });
@@ -1170,12 +1312,7 @@ async function goNextArticle(gen, reason) {
   clearLoadTimer();
   await chrome.alarms.clear(ALARM_LOAD);
   await chrome.alarms.clear(ALARM_NEXT);
-  armSpoofTimer(spoofEnd, gen);
-  try {
-    await chrome.alarms.create(ALARM_SPOOF, { when: spoofEnd });
-  } catch (err) {
-    report(err);
-  }
+  await clearSpoofDeadline();
   await stopHumanScroll(state.tabId);
   await rememberCurrentArticle(state);
   if (reason) await addLog("info", reason);
@@ -1333,9 +1470,9 @@ async function onWaitElapsed() {
   await goNextArticle(state.gen, "");
 }
 
-async function enterSwitching(gen, proxyIndex) {
+async function enterSwitching(gen, proxyIndex, budgetMs) {
   const state = await getState();
-  const deadline = Date.now() + switchBudgetMs(state.snapshot);
+  const deadline = Date.now() + (budgetMs || switchBudgetMs(state.snapshot));
   await updateState((current) => {
     if (current.gen !== gen) return current;
     current.phase = "switching";
@@ -1363,7 +1500,7 @@ async function enterSwitching(gen, proxyIndex) {
 }
 
 async function onSwitchTimeout(gen) {
-  if (!alive) return;
+  if (!alive || openingProxy) return;
   const state = await getState();
   if (!state.running || state.gen !== gen || state.phase !== "switching") return;
   if (state.switchDeadline && Date.now() + 200 < state.switchDeadline) return;
@@ -1374,6 +1511,7 @@ async function onSwitchTimeout(gen) {
 
 async function finishProxyArticles(gen) {
   if (!still(gen)) return;
+  await releaseHeld();
   const state = await getState();
   if (!state.snapshot) return;
   const next = state.proxyIndex + 1;
@@ -1452,13 +1590,14 @@ async function failProxy(message, level, gen, force) {
   } catch (err) {
     report(err);
   }
+  const failedProxy = state.snapshot.proxies[index];
   try {
     await addLog(level || "error", message);
-    const failedProxy = state.snapshot.proxies[index];
     if (failedProxy) await setProxyHealth(failedProxy, "dead", { note: message });
   } catch (err) {
     report(err);
   }
+  if (failedProxy) await releaseKey(proxyStorageKey(failedProxy));
   try {
     await detachQuiet();
   } catch (err) {
@@ -1481,6 +1620,18 @@ async function stopInternal(reason) {
   const state = await getState();
   const wasRunning = Boolean(state.running || alive);
   alive = false;
+  openingProxy = false;
+  if (wasRunning) {
+    try {
+      if (!heldKey && state.snapshot && state.snapshot.proxies) {
+        const proxy = state.snapshot.proxies[state.proxyIndex];
+        if (proxy) heldKey = proxyStorageKey(proxy);
+      }
+      await releaseHeld();
+    } catch (err) {
+      report(err);
+    }
+  }
   generation += 1;
   currentAuth = null;
   authAttempts = 0;
@@ -1633,7 +1784,7 @@ async function handleMainFrame(details, ok) {
         await finishArticleLoad();
         return;
       }
-      if (statusCode === 407 || isProxyNetError(storedError)) {
+      if (statusCode === 407 || isFatalProxyError(storedError)) {
         await failProxy("Mất kết nối proxy khi mở bài: " + (storedError || "HTTP 407"), "error", state.gen);
         return;
       }
@@ -1653,6 +1804,7 @@ async function handleMainFrame(details, ok) {
 
 async function onWatch() {
   const state = await getState();
+  if (state.running) touchHeld().catch(report);
   if (!state.running) {
     alive = false;
     await chrome.alarms.clear(ALARM_WATCH);
@@ -1664,6 +1816,7 @@ async function onWatch() {
   currentAuth = state.proxyAuth || null;
   const now = Date.now();
   if (state.phase === "switching") {
+    if (openingProxy) return;
     if (!state.switchDeadline || now >= state.switchDeadline) await onSwitchTimeout(state.gen);
     else armSwitchTimer(state.switchDeadline, state.gen);
     return;
@@ -1704,6 +1857,7 @@ async function resume() {
   } catch (err) {
     report(err);
   }
+  await reclaimIfRunning();
   if (state.phase === "checking") {
     if (state.checkDeadline && Date.now() >= state.checkDeadline) await onCheckTimeout(state.nav);
     else if (state.checkDeadline) armCheckTimer(state.checkDeadline, state.nav);
@@ -1748,6 +1902,32 @@ async function resume() {
   }
   if (state.phase === "applying_proxy") {
     await openProxy(state.proxyIndex, state.gen);
+  }
+}
+
+async function reclaimIfRunning() {
+  const state = await getState();
+  if (!state.running || !state.snapshot) return;
+  if (!["checking", "spoofing", "loading_article", "waiting"].includes(state.phase)) return;
+  const proxy = state.snapshot.proxies[state.proxyIndex];
+  if (!proxy) return;
+  const owner = await profileId();
+  const key = proxyStorageKey(proxy);
+  try {
+    const saved = await self.sharedStore.update(function (data) {
+      if (!data.proxyLease || typeof data.proxyLease !== "object" || Array.isArray(data.proxyLease)) data.proxyLease = {};
+      const lease = data.proxyLease[key];
+      if (lease && lease.owner !== owner && self.sharedStore.leaseFresh(lease)) return data;
+      data.proxyLease[key] = { owner: owner, claimedAt: Date.now() };
+      return data;
+    });
+    const lease = saved.proxyLease && saved.proxyLease[key];
+    if (lease && lease.owner === owner) {
+      heldKey = key;
+      heldTouchAt = Date.now();
+    }
+  } catch (err) {
+    report(err);
   }
 }
 
@@ -1808,8 +1988,9 @@ chrome.webRequest.onAuthRequired.addListener((details, callback) => {
   });
   ready.then(() => {
     if (details.isProxy && currentAuth && currentAuth.username && alive) {
-      authAttempts += 1;
-      if (authAttempts > 4) {
+      const ours = !mem || mem.tabId == null || details.tabId === mem.tabId || details.tabId === -1;
+      if (ours) authAttempts += 1;
+      if (ours && authAttempts > 4) {
         callback({ cancel: false });
         runFlow(() => failProxy("Proxy từ chối thông tin đăng nhập", "error", generation)).catch(report);
         return;
@@ -1841,9 +2022,10 @@ chrome.proxy.onProxyError.addListener((details) => {
     if (!alive) return;
     const state = await getState();
     if (!state.running) return;
-    if (state.phase !== "checking" && state.phase !== "loading_article") return;
+    // Mọi tab trong profile đều đi qua proxy. Chỉ lỗi proxy thật lúc đang kiểm tra mới được tính.
+    if (state.phase !== "checking") return;
     const message = details.error || details.details || "proxy error";
-    if (state.phase === "loading_article" && !details.fatal && !isProxyNetError(message)) return;
+    if (!details.fatal && !isFatalProxyError(message)) return;
     await failProxy("Proxy báo lỗi: " + message, "error", state.gen);
   }).catch(report);
 });
@@ -1896,6 +2078,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     }     else if (alarm.name === ALARM_LOAD) {
       const state = await getState();
       await onLoadTimeout(state.nav, true);
+    } else if (alarm.name === ALARM_BUSY) {
+      const state = await getState();
+      if (!state.running || state.phase !== "switching") return;
+      await openProxy(state.proxyIndex || 0, state.gen);
     } else if (alarm.name === ALARM_SWITCH) {
       const state = await getState();
       await onSwitchTimeout(state.gen);
