@@ -170,6 +170,7 @@ let proxyHealth = {};
 let proxyLease = {};
 let localProfileId = "";
 let proxyStamp = null;
+let statusFilter = "";
 
 async function ensureProfileId() {
   const stored = await chrome.storage.local.get("profileId");
@@ -237,20 +238,34 @@ function currentProxies() {
 
 function renderProxyTable() {
   const { proxies, skipped } = currentProxies();
-  $("proxyCount").textContent = proxies.length + " proxy hợp lệ";
   const hints = [];
   if (skipped) hints.push("Bỏ qua " + skipped + " dòng không đúng định dạng.");
   $("proxyHint").textContent = hints.join(" ");
 
+  const views = proxies.map((proxy) => healthView(proxy));
+  const counts = { "Chưa thử": 0, "Không": 0, "Bận": 0, "Đang dùng": 0, "Live": 0 };
+  views.forEach((health) => {
+    if (Object.prototype.hasOwnProperty.call(counts, health.text)) counts[health.text] += 1;
+  });
+  document.querySelectorAll("#proxyFilters button").forEach((button) => {
+    const status = button.dataset.status;
+    button.classList.toggle("on", status === statusFilter);
+    const count = status ? (counts[status] || 0) : proxies.length;
+    button.textContent = button.dataset.label + " " + count;
+  });
+  const shown = statusFilter ? (counts[statusFilter] || 0) : proxies.length;
+  $("proxyCount").textContent = statusFilter
+    ? shown + " / " + proxies.length + " proxy"
+    : proxies.length + " proxy hợp lệ";
+
   const body = $("proxyTable");
-  const stamp = String(proxies.length) + "\n" + proxies.map((proxy) => {
-    const health = healthView(proxy);
-    return health.text + "\t" + health.title;
-  }).join("\n");
+  const stamp = statusFilter + "\n" + proxies.length + "\n" + views.map((health) => health.text + "\t" + health.title).join("\n");
   if (stamp === proxyStamp) return;
   proxyStamp = stamp;
   const rows = [];
   proxies.forEach((proxy, index) => {
+    const health = views[index];
+    if (statusFilter && health.text !== statusFilter) return;
     const row = document.createElement("tr");
     const cells = [
       String(index + 1),
@@ -266,7 +281,6 @@ function renderProxyTable() {
     }
     const healthCell = document.createElement("td");
     const badge = document.createElement("span");
-    const health = healthView(proxy);
     badge.className = "status-badge " + health.className;
     badge.textContent = health.text;
     if (health.title) badge.title = health.title;
@@ -284,11 +298,11 @@ function renderProxyTable() {
   });
   body.replaceChildren();
   rows.forEach((row) => body.append(row));
-  if (!proxies.length) {
+  if (!rows.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
     cell.colSpan = 7;
-    cell.textContent = "Chưa có proxy hợp lệ.";
+    cell.textContent = proxies.length ? "Không có proxy ở trạng thái này." : "Chưa có proxy hợp lệ.";
     row.append(cell);
     body.append(row);
   }
@@ -447,6 +461,12 @@ for (const id of ["sourceUrl", "waitMin", "waitMax", "timeout", "articleTimeout"
 for (const id of ["scrollEnabled", "scrollSpeed", "loop"]) {
   $(id).addEventListener("change", () => { formDirty = true; });
 }
+$("proxyFilters").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-status]");
+  if (!button) return;
+  statusFilter = button.dataset.status;
+  renderProxyTable();
+});
 $("proxyTable").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-index]");
   if (!button) return;

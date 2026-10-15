@@ -37,6 +37,14 @@
       <textarea id="proxyText" rows="8" spellcheck="false" placeholder="1.2.3.4:8080&#10;socks5://5.6.7.8:1080&#10;9.9.9.9:3128:user:pass"></textarea>
       <p id="proxyHint" class="hint"></p>
 
+      <div id="proxyFilters" class="filters">
+        <button type="button" class="filter on" data-status="" data-label="Tất cả">Tất cả</button>
+        <button type="button" class="filter" data-status="Chưa thử" data-label="Chưa thử">Chưa thử</button>
+        <button type="button" class="filter" data-status="Không" data-label="Không">Không</button>
+        <button type="button" class="filter" data-status="Bận" data-label="Bận">Bận</button>
+        <button type="button" class="filter" data-status="Đang dùng" data-label="Đang dùng">Đang dùng</button>
+        <button type="button" class="filter" data-status="Live" data-label="Live">Live</button>
+      </div>
       <div class="row spread">
         <strong id="proxyCount">0 proxy</strong>
         <span>
