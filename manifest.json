@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Geo Proxy Rotator",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Xoay proxy HTTP và giả lập vị trí USA để test hiển thị bài viết theo IP.",
   "minimum_chrome_version": "109",
   "permissions": [

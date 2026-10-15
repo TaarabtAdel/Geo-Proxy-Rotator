@@ -250,19 +250,49 @@
     return payload;
   }
 
+  function pairUrl(entry) {
+    if (typeof entry === "string") return entry;
+    if (entry && typeof entry.url === "string") return entry.url;
+    return "";
+  }
+
+  function pairOk(entry) {
+    if (!entry || typeof entry !== "object" || typeof entry.ok !== "boolean") return null;
+    return entry.ok;
+  }
+
+  // Thành công giữ lại. Lỗi chỉ ghi khi chưa từng chạy được. Chuỗi cũ là cặp chưa rõ kết quả.
+  function mergePair(prev, next) {
+    const url = pairUrl(next) || pairUrl(prev);
+    if (!url) return null;
+    const prevOk = pairOk(prev);
+    const nextOk = pairOk(next);
+    if (prevOk === true || nextOk === true) return { url: url, ok: true, at: Date.now() };
+    if (prevOk === false || nextOk === false) {
+      const source = nextOk === false ? next : prev;
+      const note = String((source && source.note) || "").slice(0, 160);
+      const item = { url: url, ok: false, at: Number(source && source.at) || Date.now() };
+      if (note) item.note = note;
+      return item;
+    }
+    return url;
+  }
+
   function unionDone(left, right) {
     const out = {};
     const keys = new Set(Object.keys(left || {}).concat(Object.keys(right || {})));
     keys.forEach(function (key) {
-      const items = []
+      const byUrl = new Map();
+      []
         .concat(Array.isArray(left[key]) ? left[key] : [])
         .concat(Array.isArray(right[key]) ? right[key] : [])
-        .filter(Boolean);
-      const unique = [];
-      items.forEach(function (url) {
-        if (!unique.includes(url)) unique.push(url);
-      });
-      if (unique.length) out[key] = unique;
+        .forEach(function (entry) {
+          const url = pairUrl(entry);
+          if (!url) return;
+          byUrl.set(url, mergePair(byUrl.get(url), entry));
+        });
+      const items = Array.from(byUrl.values()).filter(Boolean);
+      if (items.length) out[key] = items;
     });
     return out;
   }
@@ -441,6 +471,8 @@
     emptyData: emptyData,
     LEASE_MS: LEASE_MS,
     leaseFresh: leaseFresh,
+    pairUrl: pairUrl,
+    mergePair: mergePair,
     describe: describe,
     chooseFile: chooseFile,
     chooseDirectory: chooseDirectory,

@@ -307,9 +307,10 @@ async function ensureDoneMap() {
 }
 
 function articleAlreadyRun(map, proxy, url) {
-  if (!proxy || !url) return false;
+  if (!proxy || !url || !map) return false;
   const list = map[proxyStorageKey(proxy)];
-  return Array.isArray(list) && list.includes(url);
+  if (!Array.isArray(list)) return false;
+  return list.some((entry) => self.sharedStore.pairUrl(entry) === url);
 }
 
 function pendingPairExists(proxies, articles, map) {
@@ -321,23 +322,44 @@ function pendingPairExists(proxies, articles, map) {
   return false;
 }
 
-async function rememberProxyArticle(proxy, url) {
+async function rememberProxyArticle(proxy, url, outcome) {
   if (!proxy || !url) return;
   const key = proxyStorageKey(proxy);
+  const now = Date.now();
+  const incoming = outcome && typeof outcome.ok === "boolean"
+    ? { url: url, ok: outcome.ok, note: outcome.ok ? "" : String(outcome.note || "").slice(0, 160), at: now }
+    : url;
   const data = await self.sharedStore.update(function (store) {
     const list = Array.isArray(store.proxyArticleDone[key]) ? store.proxyArticleDone[key].slice() : [];
-    if (!list.includes(url)) list.push(url);
+    const index = list.findIndex((entry) => self.sharedStore.pairUrl(entry) === url);
+    const merged = self.sharedStore.mergePair(index >= 0 ? list[index] : null, incoming);
+    if (!merged) return store;
+    if (index >= 0) list[index] = merged;
+    else list.push(merged);
     store.proxyArticleDone[key] = list;
     return store;
   });
-  doneMap = data.proxyArticleDone || {};
+  rememberDoneCache(data.proxyArticleDone);
 }
 
-async function rememberCurrentArticle(state) {
+function articleOutcome(state, reason) {
+  const err = String(state && state.articleError || "");
+  const status = Number(state && state.articleStatus) || 0;
+  if ((err && err !== "net::ERR_ABORTED") || status >= 400) {
+    const note = err && err !== "chrome-error" ? err : ("HTTP " + status);
+    return { ok: false, note: note.slice(0, 160) };
+  }
+  if (state && state.phase === "loading_article") {
+    return { ok: false, note: String(reason || "Chưa tải xong").slice(0, 160) };
+  }
+  return { ok: true };
+}
+
+async function rememberCurrentArticle(state, outcome) {
   if (!state || !state.snapshot) return;
   const proxy = state.snapshot.proxies[state.proxyIndex];
   const url = state.snapshot.articles[state.articleIndex];
-  await rememberProxyArticle(proxy, url);
+  await rememberProxyArticle(proxy, url, outcome);
 }
 
 function shortenUrl(url) {
@@ -401,7 +423,7 @@ function articleFailedToLoad(state, tabUrl) {
   const url = String(tabUrl || "");
   const err = String(state?.articleError || "");
   const status = Number(state?.articleStatus) || 0;
-  if (status === 407 || (err && isProxyNetError(err))) return false;
+  if (status === 407 || (err && isFatalProxyError(err))) return false;
 
   if (url.startsWith("chrome-error://")) return true;
   if (err && err !== "net::ERR_ABORTED" && err !== "chrome-error") return true;
@@ -1314,7 +1336,8 @@ async function goNextArticle(gen, reason) {
   await chrome.alarms.clear(ALARM_NEXT);
   await clearSpoofDeadline();
   await stopHumanScroll(state.tabId);
-  await rememberCurrentArticle(state);
+  const outcome = articleOutcome(state, reason);
+  if (!(state.phase === "waiting" && outcome.ok)) await rememberCurrentArticle(state, outcome);
   if (reason) await addLog("info", reason);
   const next = index + 1;
   if (next >= state.snapshot.articles.length) {
@@ -1421,6 +1444,17 @@ async function finishArticleLoad() {
   const state = await getState();
   if (!state.running || state.phase !== "loading_article" || !state.snapshot) return;
   if (await maybeSkipBadArticle(state)) return;
+  const status = Number(state.articleStatus) || 0;
+  const err = String(state.articleError || "");
+  if (status === 407 || isFatalProxyError(err)) {
+    await failProxy("Mất kết nối proxy khi mở bài: " + (err || "HTTP 407"), "error", state.gen);
+    return;
+  }
+  if ((err && err !== "net::ERR_ABORTED") || status >= 400) {
+    const why = err && err !== "chrome-error" ? err : (status >= 400 ? "HTTP " + status : "trang không tải được");
+    await goNextArticle(state.gen, "Bài không tải được: " + why + " → chuyển bài tiếp.");
+    return;
+  }
   const gen = state.gen;
   const index = state.articleIndex;
   let claimed = false;
@@ -1433,7 +1467,7 @@ async function finishArticleLoad() {
   if (!claimed || !still(gen)) return;
   clearLoadTimer();
   await chrome.alarms.clear(ALARM_LOAD);
-  await rememberCurrentArticle(state);
+  await rememberCurrentArticle(state, { ok: true });
 
   const total = state.snapshot.articles.length;
   const next = index + 1;
@@ -1780,21 +1814,18 @@ async function handleMainFrame(details, ok) {
 
     if (!ok || isGenericChromeError) {
       const storedError = fresh.articleError || (isGenericChromeError ? "" : errorText);
-      if (!storedError || storedError === "chrome-error") {
-        await finishArticleLoad();
-        return;
-      }
       if (statusCode === 407 || isFatalProxyError(storedError)) {
         await failProxy("Mất kết nối proxy khi mở bài: " + (storedError || "HTTP 407"), "error", state.gen);
         return;
       }
-      await addLog("error", "Bài không tải được: " + (storedError || ("HTTP " + statusCode)));
-      await finishArticleLoad();
+      const why = storedError && storedError !== "chrome-error"
+        ? storedError
+        : (statusCode >= 400 ? "HTTP " + statusCode : "trang không tải được");
+      await goNextArticle(fresh.gen, "Bài không tải được: " + why + " → chuyển bài tiếp.");
       return;
     }
     if (statusCode === 403) {
-      await addLog("error", "Bài trả HTTP 403.");
-      await finishArticleLoad();
+      await goNextArticle(fresh.gen, "HTTP 403 → chuyển bài tiếp.");
       return;
     }
     await addLog("success", "Trang bài đã tải xong (có thể đã redirect).");
@@ -2055,8 +2086,7 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
       const reason = articleSkipReason(state.articleStatus, state.articleError);
       if (reason) {
         if (await maybeSkipBadArticle(state)) return;
-        await addLog("error", "Bài " + reason + ".");
-        await finishArticleLoad();
+        await goNextArticle(state.gen, reason + " → chuyển bài tiếp.");
         return;
       }
       await addLog("success", "Tab báo tải xong: " + shortenUrl(url));

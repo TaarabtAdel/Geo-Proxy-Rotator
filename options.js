@@ -83,20 +83,47 @@ function sourceLabel(url) {
 
 let formDirty = false;
 
-function countDonePairs(map) {
-  let total = 0;
-  if (!map || typeof map !== "object") return 0;
+function summarizeDone(map) {
+  const stat = { total: 0, ok: 0, bad: 0, unknown: 0, notes: {} };
+  if (!map || typeof map !== "object") return stat;
   for (const list of Object.values(map)) {
-    if (Array.isArray(list)) total += list.length;
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      stat.total += 1;
+      if (entry && typeof entry === "object" && entry.ok === true) stat.ok += 1;
+      else if (entry && typeof entry === "object" && entry.ok === false) {
+        stat.bad += 1;
+        const note = String(entry.note || "Không tải được").slice(0, 80);
+        stat.notes[note] = (stat.notes[note] || 0) + 1;
+      } else stat.unknown += 1;
+    }
   }
-  return total;
+  return stat;
+}
+
+function countDonePairs(map) {
+  return summarizeDone(map).total;
 }
 
 function renderDoneCount(map) {
-  const total = countDonePairs(map);
-  $("doneHint").textContent = total
-    ? "Đã lưu " + total + " cặp proxy–bài. Lần chạy sau sẽ bỏ qua các cặp này."
-    : "Chưa có cặp proxy–bài đã chạy.";
+  const stat = summarizeDone(map);
+  if (!stat.total) {
+    $("doneHint").textContent = "Chưa có cặp proxy–bài đã chạy.";
+    return;
+  }
+  const lines = [
+    "Đã lưu " + stat.total + " cặp. Lần chạy sau sẽ bỏ qua.",
+    "Chạy được " + stat.ok + " · Không được " + stat.bad
+  ];
+  if (stat.unknown) lines.push("Chưa rõ " + stat.unknown + " (lưu từ trước, chưa ghi kết quả).");
+  const reasons = Object.keys(stat.notes)
+    .map((note) => ({ note: note, count: stat.notes[note] }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3);
+  if (reasons.length) {
+    lines.push("Lỗi hay gặp: " + reasons.map((item) => item.note + " (" + item.count + ")").join(", ") + ".");
+  }
+  $("doneHint").textContent = lines.join("\n");
 }
 
 function renderPlace(place) {
