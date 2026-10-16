@@ -310,7 +310,8 @@ function articleAlreadyRun(map, proxy, url) {
   if (!proxy || !url || !map) return false;
   const list = map[proxyStorageKey(proxy)];
   if (!Array.isArray(list)) return false;
-  return list.some((entry) => self.sharedStore.pairUrl(entry) === url);
+  const key = self.sharedStore.articlePairKey(url);
+  return list.some((entry) => self.sharedStore.articlePairKey(self.sharedStore.pairUrl(entry)) === key);
 }
 
 function pendingPairExists(proxies, articles, map) {
@@ -325,13 +326,14 @@ function pendingPairExists(proxies, articles, map) {
 async function rememberProxyArticle(proxy, url, outcome) {
   if (!proxy || !url) return;
   const key = proxyStorageKey(proxy);
+  const canon = self.sharedStore.articlePairKey(url) || url;
   const now = Date.now();
   const incoming = outcome && typeof outcome.ok === "boolean"
-    ? { url: url, ok: outcome.ok, note: outcome.ok ? "" : String(outcome.note || "").slice(0, 160), at: now }
-    : url;
+    ? { url: canon, ok: outcome.ok, note: outcome.ok ? "" : String(outcome.note || "").slice(0, 160), at: now }
+    : canon;
   const data = await self.sharedStore.update(function (store) {
     const list = Array.isArray(store.proxyArticleDone[key]) ? store.proxyArticleDone[key].slice() : [];
-    const index = list.findIndex((entry) => self.sharedStore.pairUrl(entry) === url);
+    const index = list.findIndex((entry) => self.sharedStore.articlePairKey(self.sharedStore.pairUrl(entry)) === canon);
     const merged = self.sharedStore.mergePair(index >= 0 ? list[index] : null, incoming);
     if (!merged) return store;
     if (index >= 0) list[index] = merged;
