@@ -258,23 +258,7 @@
 
   // Bỏ fbclid (và vài mã click tracking) để so / lưu theo link gốc.
   function articlePairKey(raw) {
-    const text = String(raw || "").trim();
-    if (!text) return "";
-    try {
-      const url = new URL(text);
-      ["fbclid", "gclid", "dclid", "msclkid", "twclid", "wbraid", "gbraid", "mc_eid"].forEach(function (name) {
-        url.searchParams.delete(name);
-      });
-      const drop = [];
-      url.searchParams.forEach(function (_value, name) {
-        if (/^utm_/i.test(name)) drop.push(name);
-      });
-      drop.forEach(function (name) { url.searchParams.delete(name); });
-      url.hash = "";
-      return url.href;
-    } catch (err) {
-      return text.replace(/([?&])fbclid=[^&#]*/gi, "$1").replace(/[?&]$/, "");
-    }
+    return String(raw || "").trim();
   }
 
   function pairOk(entry) {
