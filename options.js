@@ -216,6 +216,7 @@ function articleLines(text) {
 
 function validateArticles(text) {
   const urls = [];
+  const seen = new Set();
   const errors = [];
   articleLines(text).forEach((line, index) => {
     try {
@@ -224,7 +225,10 @@ function validateArticles(text) {
         errors.push("Dòng " + (index + 1) + " phải là URL http hoặc https.");
         return;
       }
-      urls.push(url.href);
+      const canon = self.sharedStore.articlePairKey(url.href) || url.href;
+      if (seen.has(canon)) return;
+      seen.add(canon);
+      urls.push(canon);
     } catch (err) {
       errors.push("Dòng " + (index + 1) + " không phải URL hợp lệ.");
     }

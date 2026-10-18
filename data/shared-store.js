@@ -256,6 +256,27 @@
     return "";
   }
 
+  // Bỏ fbclid (và vài mã click tracking) để so / lưu theo link gốc.
+  function articlePairKey(raw) {
+    const text = String(raw || "").trim();
+    if (!text) return "";
+    try {
+      const url = new URL(text);
+      ["fbclid", "gclid", "dclid", "msclkid", "twclid", "wbraid", "gbraid", "mc_eid"].forEach(function (name) {
+        url.searchParams.delete(name);
+      });
+      const drop = [];
+      url.searchParams.forEach(function (_value, name) {
+        if (/^utm_/i.test(name)) drop.push(name);
+      });
+      drop.forEach(function (name) { url.searchParams.delete(name); });
+      url.hash = "";
+      return url.href;
+    } catch (err) {
+      return text.replace(/([?&])fbclid=[^&#]*/gi, "$1").replace(/[?&]$/, "");
+    }
+  }
+
   function pairOk(entry) {
     if (!entry || typeof entry !== "object" || typeof entry.ok !== "boolean") return null;
     return entry.ok;
@@ -263,7 +284,7 @@
 
   // Thành công giữ lại. Lỗi chỉ ghi khi chưa từng chạy được. Chuỗi cũ là cặp chưa rõ kết quả.
   function mergePair(prev, next) {
-    const url = pairUrl(next) || pairUrl(prev);
+    const url = articlePairKey(pairUrl(next) || pairUrl(prev));
     if (!url) return null;
     const prevOk = pairOk(prev);
     const nextOk = pairOk(next);
@@ -287,7 +308,7 @@
         .concat(Array.isArray(left[key]) ? left[key] : [])
         .concat(Array.isArray(right[key]) ? right[key] : [])
         .forEach(function (entry) {
-          const url = pairUrl(entry);
+          const url = articlePairKey(pairUrl(entry));
           if (!url) return;
           byUrl.set(url, mergePair(byUrl.get(url), entry));
         });
@@ -472,6 +493,7 @@
     LEASE_MS: LEASE_MS,
     leaseFresh: leaseFresh,
     pairUrl: pairUrl,
+    articlePairKey: articlePairKey,
     mergePair: mergePair,
     describe: describe,
     chooseFile: chooseFile,
